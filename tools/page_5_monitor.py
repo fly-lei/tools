@@ -74,7 +74,7 @@ def background_sniffer(port, baud, stop_event, logs_list):
     pass
 
 def render():
-    st.title("📡 串口报文实时监控与行车记录仪")
+    st.title("📡 串口报文实时监控")
     st.markdown("利用系统级底层线程抓取 HEX 报文，不受页面切换影响。自动切片并限制容量 1GB。")
     # ...(将原 app.py 中工具 5 的 tab_monitor 和 tab_files 渲染逻辑贴到这里)
     tab_monitor, tab_files = st.tabs(["🔴 实时监控面板", "📁 历史日志管理"])

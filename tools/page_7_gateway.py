@@ -106,7 +106,7 @@ def render():
     with c1:
         gw_port = st.selectbox("本机模拟串口", available_ports, help="网关的 RS485 采集线应连接到此串口")
     with c2:
-        gw_baud = st.selectbox("波特率", [9600, 19200, 38400, 57600, 115200], index=0)
+        gw_baud = st.selectbox("波特率", [4800,9600, 19200, 38400, 57600, 115200], index=0)
     with c3:
         gw_slave = st.number_input("模拟的站号 (Slave ID)", min_value=1, max_value=247, value=1)
 
