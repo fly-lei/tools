@@ -40,7 +40,8 @@ if not os.path.exists(SNAPSHOT_DIR):
 
 def render():
     st.title("🪞 Modbus 设备镜像抓取与克隆模拟器")
-    st.markdown("从真实设备中批量抓取并保存寄存器数据，随后可以作为**虚拟从站**完美克隆并重放这些数据。")
+    st.markdown(
+        "从真实设备中批量抓取并保存寄存器数据，随后可以作为**虚拟从站**完美克隆并重放这些数据。支持运行时实时篡改底层数据！")
     st.divider()
 
     tab_record, tab_simulate = st.tabs(["📥 抓取真实设备 (录制镜像)", "📤 启动克隆设备 (模拟从站)"])
@@ -58,7 +59,7 @@ def render():
         with c1:
             rec_port = st.selectbox("串口", available_ports, key="rec_port")
         with c2:
-            rec_baud = st.selectbox("波特率", [4800,9600, 19200, 38400, 57600, 115200], index=0, key="rec_baud")
+            rec_baud = st.selectbox("波特率", [9600, 19200, 38400, 57600, 115200], index=0, key="rec_baud")
         with c3:
             rec_slave = st.number_input("真实设备站号", min_value=1, max_value=247, value=1, key="rec_slave")
 
@@ -70,7 +71,7 @@ def render():
             end_addr = st.number_input("结束地址 (十进制)", min_value=1, max_value=65535, value=10000)
         with c6:
             chunk_size = st.number_input("单次读取块大小 (最大125)", min_value=1, max_value=125, value=100,
-                                         help="为了防止断点报错，分块读取。如果设备极其严格，可设为更小的值。")
+                                         help="为了防止断点报错，分块读取。")
 
         device_name = st.text_input("💾 给这个设备起个名字 (用于保存镜像)", placeholder="例如：水冷螺杆机_V1_现场A")
 
@@ -91,7 +92,6 @@ def render():
                 for offset in range(start_addr, end_addr + 1, chunk_size):
                     read_len = min(chunk_size, end_addr - offset + 1)
 
-                    # 尝试读取
                     success, res = modbus_comm.master_read(rec_port, rec_baud, rec_slave, 3, offset, read_len,
                                                            timeout=0.3)
 
@@ -102,7 +102,6 @@ def render():
                     else:
                         fail_chunks += 1
 
-                    # 更新进度
                     current_progress = min(1.0, (offset - start_addr + chunk_size) / total_registers)
                     progress_bar.progress(current_progress)
                     status_text.text(
@@ -111,7 +110,6 @@ def render():
                 if not captured_data:
                     st.error("❌ 未能抓取到任何有效数据，请检查接线、站号或尝试缩小读取范围！")
                 else:
-                    # 保存到 JSON
                     save_path = os.path.join(SNAPSHOT_DIR, f"{device_name}.json")
                     snapshot = {
                         "metadata": {
@@ -128,7 +126,6 @@ def render():
                     st.success(
                         f"🎉 抓取成功！共捕获到 {len(captured_data)} 个有效寄存器数据。已保存为 `{device_name}.json`。")
 
-                    # 展示前 20 个抓取到的数据
                     st.write("📊 预览抓取到的部分数据：")
                     preview_items = list(captured_data.items())[:20]
                     preview_df = pd.DataFrame(preview_items, columns=["寄存器地址", "十进制数值"])
@@ -148,7 +145,6 @@ def render():
         file_options = [os.path.basename(f) for f in saved_files]
         selected_file = st.selectbox("选择镜像文件", file_options)
 
-        # 加载并预览镜像
         file_path = os.path.join(SNAPSHOT_DIR, selected_file)
         with open(file_path, "r", encoding="utf-8") as f:
             snapshot_data = json.load(f)
@@ -172,14 +168,14 @@ def render():
 
         st.divider()
 
-        # 线程启停逻辑
         if 'sim_running' not in st.session_state:
             st.session_state.sim_running = False
+        if 'sim_store' not in st.session_state:
+            st.session_state.sim_store = None
 
         is_simulate_ui = st.toggle("🟢 开启后台虚拟设备 (随时接受主站读取)", value=st.session_state.sim_running)
 
         if is_simulate_ui and not st.session_state.sim_running:
-            # 1. 准备内存空间 (65536 涵盖全地址)
             store = SlaveContext(
                 di=ModbusSequentialDataBlock(0, [0] * 65536),
                 co=ModbusSequentialDataBlock(0, [0] * 65536),
@@ -187,12 +183,12 @@ def render():
                 ir=ModbusSequentialDataBlock(0, [0] * 65536)
             )
 
-            # 2. 将抓取的 JSON 数据注入到内存里
             reg_data = snapshot_data["data"]
             for addr_str, val in reg_data.items():
                 store.setValues(3, int(addr_str), [val])
 
-            # 3. 启动 Server (兼容性包裹)
+            st.session_state.sim_store = store
+
             try:
                 context = ModbusServerContext(slaves=store, single=True)
             except TypeError:
@@ -216,14 +212,103 @@ def render():
 
         elif not is_simulate_ui and st.session_state.sim_running:
             st.session_state.sim_running = False
-            # 发送停止指令
+            st.session_state.sim_store = None
+
             try:
+                from pymodbus.server import ServerStop
                 if ServerStop: ServerStop()
             except Exception:
-                pass
+                try:
+                    from pymodbus.server import StopServer as ServerStop
+                    if ServerStop: ServerStop()
+                except Exception:
+                    pass
+
             st.toast("虚拟设备已停止。", icon="🛑")
             st.rerun()
 
         if st.session_state.sim_running:
-            st.success(
-                f"🎉 **虚拟设备运行中！** 你的主站现在可以通过串口 `{sim_port}`，站号 `{sim_slave}` 来读取它了！(哪怕切到其他页面它也会在后台运行)")
+            st.success(f"🎉 **虚拟设备运行中！** 主站现在可以通过串口 `{sim_port}`，站号 `{sim_slave}` 来读取它了！")
+
+            # ==========================================
+            # 🌟 核心新增：运行时实时数据篡改 UI (带整字与位操作)
+            # ==========================================
+            if st.session_state.sim_store is not None:
+                st.divider()
+                st.subheader("🎛️ 运行时故障注入 (实时篡改内存)")
+                st.markdown(
+                    "在模拟器不断电的情况下，强行越权修改底层寄存器数据，用于测试主站/网关对异常值和边界条件的反应。")
+
+                current_store = st.session_state.sim_store
+
+                # 1. 选择要透视和修改的目标地址
+                mod_addr = st.number_input("🎯 目标寄存器地址", min_value=0, max_value=65535, value=0, key="mod_addr")
+
+                # 2. 实时从内存中读取该地址的当前真实值
+                try:
+                    curr_vals = current_store.getValues(3, mod_addr, count=1)
+                    curr_val = curr_vals[0] if curr_vals else 0
+                except Exception:
+                    curr_val = 0
+
+                # 将十进制转为漂亮的16位二进制字符串展现，并4个一组用空格隔开
+                binary_str = f"{curr_val:016b}"
+                binary_formatted = f"{binary_str[:4]} {binary_str[4:8]} {binary_str[8:12]} {binary_str[12:]}"
+
+                st.info(f"**当前底层真实值反馈:**\n"
+                        f"- 十进制: `{curr_val}` \n"
+                        f"- 十六进制: `0x{curr_val:04X}` \n"
+                        f"- 二进制: `{binary_formatted}`")
+
+                # 3. 分隔出“整字修改”和“位操作修改”两个标签页
+                tab_word, tab_bit = st.tabs(["🔢 覆盖整字 (16位)", "🎛️ 单 Bit 位独立操作"])
+
+                # 【标签页 1：整字覆盖】
+                with tab_word:
+                    c_word1, c_word2 = st.columns([3, 1])
+                    with c_word1:
+                        mod_val = st.number_input("✍️ 欲篡改的新数值", min_value=0, max_value=65535, value=curr_val,
+                                                  key="mod_val")
+                    with c_word2:
+                        st.write("")  # 排版对齐
+                        st.write("")
+                        if st.button("⚡ 强行覆写整字", type="primary", use_container_width=True):
+                            try:
+                                current_store.setValues(3, mod_addr, [mod_val])
+                                st.toast(f"成功将地址 {mod_addr} 的值修改为 {mod_val}！", icon="⚡")
+                                time.sleep(0.3)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ 覆写失败: {e}")
+
+                # 【标签页 2：单 Bit 位操作】
+                with tab_bit:
+                    st.caption("位操作基于当前寄存器的真实值进行“与/或”运算，保证绝不会影响其他位的状态。")
+                    c_bit1, c_bit2, c_bit3 = st.columns([2, 2, 1])
+                    with c_bit1:
+                        # 生成 0 到 15 的列表，倒序显示更符合二进制习惯，但这里正序即可
+                        bit_pos = st.selectbox("选择操作的 Bit 位", range(16),
+                                               format_func=lambda x: f"Bit {x} (第 {x} 位)")
+                    with c_bit2:
+                        bit_action = st.radio("设置目标状态", [1, 0],
+                                              format_func=lambda x: "🟢 置 1 (ON)" if x == 1 else "🔴 清 0 (OFF)",
+                                              horizontal=True)
+                    with c_bit3:
+                        st.write("")
+                        st.write("")
+                        if st.button("🔧 闪电注入", type="primary", use_container_width=True):
+                            try:
+                                # 🌟 核心位操作逻辑：
+                                if bit_action == 1:
+                                    # 置 1: 使用按位或 (OR) 操作
+                                    new_val = curr_val | (1 << bit_pos)
+                                else:
+                                    # 清 0: 使用按位与 (AND) 和按位取反 (NOT) 操作
+                                    new_val = curr_val & ~(1 << bit_pos)
+
+                                current_store.setValues(3, mod_addr, [new_val])
+                                st.toast(f"成功将地址 {mod_addr} 的 Bit {bit_pos} 设置为 {bit_action}！", icon="🔧")
+                                time.sleep(0.3)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ 位操作失败: {e}")

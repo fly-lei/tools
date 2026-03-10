@@ -1,0 +1,1 @@
+pyinstaller --clean --noconfirm --onedir --console --hidden-import serial --hidden-import serial.tools --hidden-import serial.tools.list_ports --collect-all pyserial --collect-all pymodbus --collect-all streamlit --add-data "app.py;." --add-data "tools;tools" --add-data "utils;utils" run_app.py

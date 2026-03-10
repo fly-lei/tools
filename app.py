@@ -4,7 +4,7 @@ import threading
 # 导入所有拆分出的页面组件
 from tools import page_1_parser, page_2_crc, page_3_master, page_4_ota
 from tools import page_5_monitor, page_6_dict, page_7_gateway
-from tools import page_8_sn_writer, page_9_simulator
+from tools import page_8_sn_writer, page_9_simulator,page_10_poller
 
 # 尝试导入 ServerStop 用于页面切换时的资源释放
 try:
@@ -57,7 +57,8 @@ tool_choice = st.sidebar.radio(
         "6. 跨文件表格字典匹配",
         "7. 网关云端联动检测",
         "8. 机组SN条码写入",
-        "9. Modbus 设备镜像模拟器"
+        "9. Modbus 设备镜像模拟器",
+        "10. 多网关并发轮询压测"
     ]
 )
 
@@ -101,3 +102,5 @@ elif tool_choice == "8. 机组SN条码写入":
     page_8_sn_writer.render()
 elif tool_choice == "9. Modbus 设备镜像模拟器":
     page_9_simulator.render()
+elif tool_choice == "10. 多网关并发轮询压测":
+    page_10_poller.render()
