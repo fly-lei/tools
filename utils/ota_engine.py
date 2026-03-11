@@ -7,6 +7,7 @@ def run_ota_upgrade(com_port, baudrate, slave_id, bin_data, offset, task_state, 
     """
     纯后台执行引擎，不依赖任何 UI 控件。
     状态通过 task_state 字典与前端跨线程共享。
+    包含极度详尽的 TX/RX Modbus 报文级日志打印。
     """
     # 初始化状态
     task_state["logs"].clear()
@@ -29,6 +30,9 @@ def run_ota_upgrade(com_port, baudrate, slave_id, bin_data, offset, task_state, 
             task_state["msg_status"] = status
 
     def to_hex_list(data_list):
+        """安全地将列表转换为漂亮的 Hex 字符串"""
+        if not isinstance(data_list, list):
+            return str(data_list)
         return "[" + ", ".join([f"0x{v:04X}" for v in data_list]) + "]"
 
     try:
@@ -64,31 +68,48 @@ def run_ota_upgrade(com_port, baudrate, slave_id, bin_data, offset, task_state, 
         word1 = (transfer_file[2] << 8) | transfer_file[3]
         word2 = (transfer_file[4] << 8) | transfer_file[5]
 
+        # ==========================================
+        # 步骤 1: 写入文件头部特征字
+        # ==========================================
         record_log(f"▶️ [里程碑] 写入文件头部特征字到 50006, 50007...")
         data_step1 = [word1, word2]
-        record_log(f"TX -> [0x10 写多寄存器] 详细报文:{to_hex_list(data_step1)}", is_txrx=True)
+        record_log(f"TX -> [0x10 写多寄存器] 地址:50006, 数量:2, 数据:{to_hex_list(data_step1)}", is_txrx=True)
         s, r = modbus_comm.master_write_10(com_port, baudrate, slave_id, 50006, data_step1, timeout=timeout_sec)
-        if not s:
-            record_log(f"❌ 步骤1失败: {r}", "error")
+        if s:
+            record_log(f"RX <- [0x10 响应] 写入成功: {r}", is_txrx=True)
+        else:
+            record_log(f"RX <- [0x10 报错] 写入失败: {r}", "error", is_txrx=True)
             task_state["is_running"] = False
             task_state["result"] = False
             return
         time.sleep(1)
 
+        # ==========================================
+        # 步骤 2: 下发 0xA1 升级请求
+        # ==========================================
         record_log("▶️ [里程碑] 往下发 50004 写入升级请求指令 0xA1...")
         data_step2 = [0x00A1]
+        record_log(f"TX -> [0x10 写多寄存器] 地址:50004, 数量:1, 数据:{to_hex_list(data_step2)}", is_txrx=True)
         s, r = modbus_comm.master_write_10(com_port, baudrate, slave_id, 50004, data_step2, timeout=timeout_sec)
-        if not s:
-            record_log(f"❌ 步骤2失败: {r}", "error")
+        if s:
+            record_log(f"RX <- [0x10 响应] 写入成功: {r}", is_txrx=True)
+        else:
+            record_log(f"RX <- [0x10 报错] 写入失败: {r}", "error", is_txrx=True)
             task_state["is_running"] = False
             task_state["result"] = False
             return
         time.sleep(1)
 
+        # ==========================================
+        # 步骤 3: 读取 50004 检查机组状态
+        # ==========================================
         record_log("▶️ [里程碑] 读取 50004 检查机组状态...")
+        record_log(f"TX -> [0x03 读保持寄存器] 地址:50004, 数量:1", is_txrx=True)
         s, r = modbus_comm.master_read(com_port, baudrate, slave_id, 3, 50004, 1, timeout=timeout_sec)
-        if not s:
-            record_log(f"RX <- 读取失败: {r}", "error", is_txrx=True)
+        if s:
+            record_log(f"RX <- [0x03 响应] 读取成功: {to_hex_list(r)}", is_txrx=True)
+        else:
+            record_log(f"RX <- [0x03 报错] 读取失败: {r}", "error", is_txrx=True)
             task_state["is_running"] = False
             task_state["result"] = False
             return
@@ -100,9 +121,15 @@ def run_ota_upgrade(com_port, baudrate, slave_id, bin_data, offset, task_state, 
             record_log("✅ 机组允许【全新升级】！")
         elif status_code == 0x00B1:
             record_log("⚠️ 机组请求【断点续传】！正在获取上次断点...")
+            # ==========================================
+            # 步骤 4 (可选): 断点续传读取 UID
+            # ==========================================
+            record_log(f"TX -> [0x03 读保持寄存器] 地址:50010, 数量:1", is_txrx=True)
             s_uid, r_uid = modbus_comm.master_read(com_port, baudrate, slave_id, 3, 50010, 1, timeout=timeout_sec)
-            if not s_uid:
-                record_log(f"RX <- 读取断点失败: {r_uid}", "error", is_txrx=True)
+            if s_uid:
+                record_log(f"RX <- [0x03 响应] 读取成功断点 UID: {to_hex_list(r_uid)}", is_txrx=True)
+            else:
+                record_log(f"RX <- [0x03 报错] 读取断点失败: {r_uid}", "error", is_txrx=True)
                 task_state["is_running"] = False
                 task_state["result"] = False
                 return
@@ -127,6 +154,9 @@ def run_ota_upgrade(com_port, baudrate, slave_id, bin_data, offset, task_state, 
         else:
             record_log(f"▶️ 开始发包！总计需发 {total_chunks} 包...")
 
+        # ==========================================
+        # 步骤 5: 循环发包逻辑
+        # ==========================================
         for i in range(start_chunk, total_chunks):
             chunk = transfer_file[i * chunk_size: (i + 1) * chunk_size]
             if len(chunk) < chunk_size:
@@ -144,23 +174,35 @@ def run_ota_upgrade(com_port, baudrate, slave_id, bin_data, offset, task_state, 
                 record_log(f"📤 正在发送第 {i + 1}/{total_chunks} 包 (UID:{current_uid})...", "info")
 
             while retry < 3:
-                record_log(f"TX -> 地址:50100, 重试:{retry}, UID:{current_uid}", is_txrx=True)
+                # 记录详细的数据包下发 TX
+                record_log(
+                    f"TX -> [0x10 写固件包] 地址:50100, 重试:{retry}, 数量:{len(words)}, 数据:{to_hex_list(words)}",
+                    is_txrx=True)
                 s_w, r_w = modbus_comm.master_write_10(com_port, baudrate, slave_id, 50100, words, timeout=timeout_sec)
 
                 if s_w:
+                    record_log(f"RX <- [0x10 响应] 写入固件包成功: {r_w}", is_txrx=True)
+
+                    # 立刻查 UID
+                    record_log(f"TX -> [0x03 读UID校验] 地址:50010, 数量:1", is_txrx=True)
                     s_r, r_r = modbus_comm.master_read(com_port, baudrate, slave_id, 3, 50010, 1, timeout=timeout_sec)
                     if s_r:
+                        record_log(f"RX <- [0x03 响应] 读回设备当前UID: {to_hex_list(r_r)}", is_txrx=True)
                         expected_uid = (current_uid + 0) & 0xFFFF
                         if r_r[0] == expected_uid:
-                            current_uid = r_r[0]+1
+                            current_uid = r_r[0] + 1
                             success_chunk = True
                             if packet_delay > 0 and i < total_chunks - 1:
                                 time.sleep(packet_delay)
                             break
                         else:
-                            record_log(f"⚠️ UID未更新或错乱，准备重试...", "warning")
+                            record_log(
+                                f"⚠️ UID未更新或错乱(期望:0x{expected_uid:04X}, 实际:0x{r_r[0]:04X})，准备重试...",
+                                "warning")
                     else:
-                        record_log(f"RX <- 读取50010失败: {r_r}", "error", is_txrx=True)
+                        record_log(f"RX <- [0x03 报错] 读取50010失败: {r_r}", "error", is_txrx=True)
+                else:
+                    record_log(f"RX <- [0x10 报错] 写入固件包失败: {r_w}", "error", is_txrx=True)
 
                 retry += 1
                 time.sleep(0.5)
@@ -171,34 +213,52 @@ def run_ota_upgrade(com_port, baudrate, slave_id, bin_data, offset, task_state, 
                 task_state["result"] = False
                 return
 
-            # 🌟 向前端暴露进度
             task_state["progress"] = (i + 1) / total_chunks
             task_state["progress_text"] = f"固件进度: {int((i + 1) / total_chunks * 100)}% (当前UID:{current_uid})"
 
+        # ==========================================
+        # 步骤 6: 传包完成，写 0xC1
+        # ==========================================
         record_log("▶️ [里程碑] 传包完成！写 0xC1...")
-        s, r = modbus_comm.master_write_10(com_port, baudrate, slave_id, 50008, [0x00C1], timeout=timeout_sec)
-        if not s:
+        data_step6 = [0x00C1]
+        record_log(f"TX -> [0x10 写多寄存器] 地址:50008, 数量:1, 数据:{to_hex_list(data_step6)}", is_txrx=True)
+        s, r = modbus_comm.master_write_10(com_port, baudrate, slave_id, 50008, data_step6, timeout=timeout_sec)
+        if s:
+            record_log(f"RX <- [0x10 响应] 写入成功: {r}", is_txrx=True)
+        else:
+            record_log(f"RX <- [0x10 报错] 写入失败: {r}", "error", is_txrx=True)
             task_state["is_running"] = False
             task_state["result"] = False
             return
 
+        # ==========================================
+        # 步骤 7: 读取 50008 检查状态
+        # ==========================================
         record_log("▶️ [里程碑] 读取 50008 检查机组状态...")
+        record_log(f"TX -> [0x03 读保持寄存器] 地址:50008, 数量:1", is_txrx=True)
         s, r = modbus_comm.master_read(com_port, baudrate, slave_id, 3, 50008, 1, timeout=timeout_sec)
-        if not s:
-            record_log(f"RX <- 读取失败: {r}", "error", is_txrx=True)
+        if s:
+            record_log(f"RX <- [0x03 响应] 读取成功: {to_hex_list(r)}", is_txrx=True)
+        else:
+            record_log(f"RX <- [0x03 报错] 读取失败: {r}", "error", is_txrx=True)
 
-
-
+        # 烧录等待期
         record_log("⏳ 进入烧录阶段，等待 1 分钟...")
         for w in range(60):
             time.sleep(1)
             task_state["progress_text"] = f"固件烧录中... 剩余 {60 - w - 1} 秒"
             task_state["progress"] = (w + 1) / 60
 
+        # ==========================================
+        # 步骤 8: 最终完整性校验
+        # ==========================================
         record_log("▶️ [里程碑] 最终完整性校验...")
+        record_log(f"TX -> [0x03 读保持寄存器] 地址:50011, 数量:1", is_txrx=True)
         s, r = modbus_comm.master_read(com_port, baudrate, slave_id, 3, 50011, 1, timeout=timeout_sec)
-        if not s:
-            record_log(f"RX <- 最终校验读取失败", "error")
+        if s:
+            record_log(f"RX <- [0x03 响应] 最终校验读取成功: {to_hex_list(r)}", is_txrx=True)
+        else:
+            record_log(f"RX <- [0x03 报错] 最终校验读取失败: {r}", "error", is_txrx=True)
             task_state["is_running"] = False
             task_state["result"] = False
             return
